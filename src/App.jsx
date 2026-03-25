@@ -28,12 +28,35 @@ const STATUSES = [
   { value: "descartado", label: "Descartado", color: "#dc2626", bg: "#fee2e2" },
 ];
 
-// ── Storage helpers (localStorage) ──────────────────────────────────────────
-function loadReports() {
-  try { return JSON.parse(localStorage.getItem(REPORTS_KEY) || "[]"); } catch { return []; }
+// ── JSONBin config ────────────────────────────────────────────────────────────
+// IMPORTANTE: reemplaza estos dos valores con los tuyos de jsonbin.io
+const JSONBIN_API_KEY = process.env.REACT_APP_JSONBIN_KEY || "";
+const JSONBIN_BIN_ID  = process.env.REACT_APP_JSONBIN_BIN || "";
+const JSONBIN_URL     = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`;
+
+async function loadReports() {
+  if (!JSONBIN_API_KEY || !JSONBIN_BIN_ID) return [];
+  try {
+    const res = await fetch(`${JSONBIN_URL}/latest`, {
+      headers: { "X-Master-Key": JSONBIN_API_KEY }
+    });
+    const data = await res.json();
+    return Array.isArray(data.record?.reports) ? data.record.reports : [];
+  } catch { return []; }
 }
-function saveReports(list) {
-  try { localStorage.setItem(REPORTS_KEY, JSON.stringify(list)); } catch {}
+
+async function saveReports(list) {
+  if (!JSONBIN_API_KEY || !JSONBIN_BIN_ID) return;
+  try {
+    await fetch(JSONBIN_URL, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Master-Key": JSONBIN_API_KEY
+      },
+      body: JSON.stringify({ reports: list })
+    });
+  } catch {}
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -138,6 +161,7 @@ function SurveyForm({ reports, setReports }) {
   const [form, setForm] = useState({ type:"", area:"", lugar:"", description:"", reporter:"", priority:"media" });
   const [errors, setErrors] = useState({});
   const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const validate = () => {
     const e = {};
@@ -147,17 +171,19 @@ function SurveyForm({ reports, setReports }) {
     return e;
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
+    setSaving(true);
     const report = {
       id: Date.now().toString(), ...form,
       status:"nuevo", actionPlan:"", comments:[],
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     const updated = [report, ...reports];
-    saveReports(updated);
+    await saveReports(updated);
     setReports(updated);
+    setSaving(false);
     setSubmitted(true);
   };
 
@@ -249,12 +275,12 @@ function SurveyForm({ reports, setReports }) {
           placeholder="Puedes reportar de forma anónima" style={inputStyle(false)} />
       </FieldGroup>
 
-      <button onClick={handleSubmit}
-        style={{ width:"100%", padding:16, background:"linear-gradient(135deg,#1a1a2e,#2d3561)",
+      <button onClick={handleSubmit} disabled={saving}
+        style={{ width:"100%", padding:16, background: saving ? "#94a3b8" : "linear-gradient(135deg,#1a1a2e,#2d3561)",
           color:"#fff", border:"none", borderRadius:12, fontFamily:"'Sora',sans-serif",
-          fontWeight:700, fontSize:16, cursor:"pointer", letterSpacing:0.5,
+          fontWeight:700, fontSize:16, cursor: saving ? "not-allowed" : "pointer", letterSpacing:0.5,
           boxShadow:"0 4px 20px rgba(26,26,46,.25)" }}>
-        📤 Enviar Reporte
+        {saving ? "⏳ Enviando..." : "📤 Enviar Reporte"}
       </button>
     </div>
   );
@@ -299,23 +325,23 @@ function AdminDashboard({ reports, setReports, onLogout }) {
   const [editComment, setEditComment]   = useState("");
   const [copied, setCopied]             = useState(false);
 
-  const persist = (updated) => { saveReports(updated); setReports(updated); };
+  const persist = async (updated) => { await saveReports(updated); setReports(updated); };
 
-  const updateStatus = (id, status) => {
+  const updateStatus = async (id, status) => {
     const upd = reports.map(r => r.id===id ? {...r, status, updatedAt:new Date().toISOString()} : r);
-    persist(upd);
+    await persist(upd);
     if (selected?.id===id) setSelected(upd.find(r => r.id===id));
   };
-  const savePlan = (id) => {
+  const savePlan = async (id) => {
     const upd = reports.map(r => r.id===id ? {...r, actionPlan:editPlan, updatedAt:new Date().toISOString()} : r);
-    persist(upd);
+    await persist(upd);
     if (selected?.id===id) setSelected(upd.find(r => r.id===id));
   };
-  const addComment = (id) => {
+  const addComment = async (id) => {
     if (!editComment.trim()) return;
     const comment = { text:editComment, date:new Date().toISOString() };
     const upd = reports.map(r => r.id===id ? {...r, comments:[...(r.comments||[]),comment], updatedAt:new Date().toISOString()} : r);
-    persist(upd);
+    await persist(upd);
     if (selected?.id===id) setSelected(upd.find(r => r.id===id));
     setEditComment("");
   };
@@ -657,10 +683,30 @@ function NavBar({ view, setView, isAdmin }) {
 export default function App() {
   const [view, setView]       = useState("survey");
   const [reports, setReports] = useState([]);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => { setReports(loadReports()); }, []);
+  const fetchReports = async () => {
+    const data = await loadReports();
+    setReports(data);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchReports();
+    // Auto-refresh cada 30 segundos para el admin
+    const interval = setInterval(fetchReports, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const isAdmin = view === "admin";
+
+  if (loading) return (
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh",
+      fontFamily:"'Sora',sans-serif", color:"#64748b", flexDirection:"column", gap:12 }}>
+      <div style={{ fontSize:32 }}>🛡️</div>
+      <div>Cargando SafeReport...</div>
+    </div>
+  );
 
   return (
     <div style={{ minHeight:"100vh", background:"#f8fafc" }}>
